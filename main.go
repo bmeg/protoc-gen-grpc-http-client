@@ -2,14 +2,16 @@ package main
 
 import (
 	"bytes"
-	"io/ioutil"
+	"flag"
 	"log"
-	"os"
 	"strings"
 	"text/template"
 
-	"github.com/golang/protobuf/proto"
-	plugin "github.com/golang/protobuf/protoc-gen-go/plugin"
+	//"github.com/golang/glog"
+	"google.golang.org/genproto/googleapis/api/annotations"
+	"google.golang.org/protobuf/proto"
+
+	"google.golang.org/protobuf/compiler/protogen"
 )
 
 var CODE_HEADER string = `
@@ -41,6 +43,9 @@ func New{{.Service}}HttpClient(url string) *{{.Service}}HttpClient {
 
 var CODE_METHOD string = `
 func (client *{{.Service}}HttpClient) {{.Name}}(i *{{.InputType}}) (*{{.OutputType}}, error) {
+	// StreamingInput: {{.StreamInput}}
+	// StreamingOutput: {{.StreamOutput}}
+	
 	return nil, nil
 }
 
@@ -88,64 +93,93 @@ func boolPtrDefaultFalse(b *bool) bool {
 }
 
 func main() {
-	input, err := ioutil.ReadAll(os.Stdin)
-	if err != nil {
-		log.Printf("failed to read code generator request: %v", err)
-		return
-	}
-	req := new(plugin.CodeGeneratorRequest)
-	if err = proto.Unmarshal(input, req); err != nil {
-		log.Printf("failed to unmarshal code generator request: %v", err)
-		return
-	}
+	flag.Parse()
+	//defer glog.Flush()
 
-	headerTemplate, _ := template.New("header").Parse(CODE_HEADER)
-	if err != nil {
-		log.Fatal(err)
-	}
+	/*
+		if *versionFlag {
+			fmt.Printf("Version %v, commit %v, built at %v\n", version, commit, date)
+			os.Exit(0)
+		}
+	*/
 
-	serviceTemplate, _ := template.New("service").Parse(CODE_SERVICE)
-	methodTemplate, _ := template.New("method").Parse(CODE_METHOD)
+	protogen.Options{
+		ParamFunc: flag.CommandLine.Set,
+	}.Run(func(gen *protogen.Plugin) error {
+		headerTemplate, _ := template.New("header").Parse(CODE_HEADER)
+		serviceTemplate, _ := template.New("service").Parse(CODE_SERVICE)
+		methodTemplate, _ := template.New("method").Parse(CODE_METHOD)
 
-	out := []*plugin.CodeGeneratorResponse_File{}
-	for _, file := range req.ProtoFile {
-		if contains(req.FileToGenerate, *file.Name) {
-			//log.Printf("File: %s", *file.Name)
-			text := bytes.NewBufferString("")
-			headerTemplate.Execute(text, headerDesc{Package: *file.Package})
-			for _, service := range file.Service {
-				serviceTemplate.Execute(text, serviceDesc{Service: *service.Name})
-				log.Printf("Service: %s", *service.Name)
-				for _, method := range service.Method {
-					log.Printf(" method: %s", method)
-					err := methodTemplate.Execute(text, methodDesc{
-						Package: *file.Package,
-						Service: *service.Name, Name: *method.Name,
-						InputType:    cleanProtoType(*method.InputType, *file.Package),
-						OutputType:   cleanProtoType(*method.OutputType, *file.Package),
-						StreamOutput: boolPtrDefaultFalse(method.ServerStreaming),
-						StreamInput:  boolPtrDefaultFalse(method.ClientStreaming),
-					})
-					if err != nil {
-						log.Printf("Error: %s", err)
+		for _, file := range gen.Files {
+
+			log.Printf("ext: %#v", file.Extensions)
+			if contains(gen.Request.FileToGenerate, *file.Proto.Name) {
+				//log.Printf("File: %s", *file.Name)
+				text := bytes.NewBufferString("")
+				headerTemplate.Execute(text, headerDesc{Package: *file.Proto.Package})
+				for _, service := range file.Services {
+					serviceTemplate.Execute(text, serviceDesc{Service: service.GoName})
+					log.Printf("Service: %s", service.GoName)
+					for _, method := range service.Methods {
+
+						httpMethod := ""
+						httpPath := ""
+						if proto.HasExtension(method.Desc.Options(), annotations.E_Http) {
+							log.Printf("Has HTTP")
+							ext := proto.GetExtension(method.Desc.Options(), annotations.E_Http)
+							opts, ok := ext.(*annotations.HttpRule)
+							if !ok {
+								//return nil, fmt.Errorf("extension is %T; want an HttpRule", ext)
+							} else {
+								if p, ok := opts.Pattern.(*annotations.HttpRule_Get); ok {
+									httpMethod = "GET"
+									httpPath = p.Get
+								} else {
+									log.Printf("http: %#v", opts.Pattern)
+								}
+							}
+						}
+
+						log.Printf(" method: %#v", method.Desc.Options().ProtoReflect().ProtoMethods())
+						err := methodTemplate.Execute(text, methodDesc{
+							Package: *file.Proto.Package,
+							Service: service.GoName, Name: method.GoName,
+							InputType:    cleanProtoType(method.Input.GoIdent.GoName, *file.Proto.Package),
+							OutputType:   cleanProtoType(method.Output.GoIdent.GoName, *file.Proto.Package),
+							StreamOutput: method.Desc.IsStreamingServer(),
+							StreamInput:  method.Desc.IsStreamingClient(),
+							HttpMethod:   httpMethod,
+							HttpPath:     httpPath,
+						})
+						if err != nil {
+							log.Printf("Error: %s", err)
+						}
 					}
 				}
+				n := strings.Replace(*file.Proto.Name, ".proto", ".pb.httpclient.go", -1)
+				log.Printf("output: %s", n)
+				genFile := gen.NewGeneratedFile(n, protogen.GoImportPath(file.GoImportPath))
+				if _, err := genFile.Write(text.Bytes()); err != nil {
+					return err
+				}
+				//t := text.String()
+				//f := &plugin.CodeGeneratorResponse_File{Name: &n, Content: &t}
+				//out = append(out, f)
 			}
-			n := strings.Replace(*file.Name, ".proto", ".pb.httpclient.go", -1)
-			t := text.String()
-			f := &plugin.CodeGeneratorResponse_File{Name: &n, Content: &t}
-			out = append(out, f)
 		}
-	}
 
-	resp := &plugin.CodeGeneratorResponse{File: out}
+		/*
+			resp := &plugin.CodeGeneratorResponse{File: out}
 
-	buf, err := proto.Marshal(resp)
-	if err != nil {
-		log.Fatal(err)
-	}
-	if _, err := os.Stdout.Write(buf); err != nil {
-		log.Fatal(err)
-	}
+			buf, err := proto.Marshal(resp)
+			if err != nil {
+				log.Fatal(err)
+			}
+			if _, err := os.Stdout.Write(buf); err != nil {
+				log.Fatal(err)
+			}
+		*/
+		return nil
+	})
 
 }
