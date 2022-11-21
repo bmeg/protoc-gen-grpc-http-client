@@ -1,0 +1,117 @@
+
+syntax = "proto3";
+
+package simple;
+
+option go_package = "github.com/bmeg/protoc-gen-grpc-http-client/simple";
+
+import "google/api/annotations.proto";
+import "google/protobuf/struct.proto";
+
+message Empty {}
+
+message GraphID {
+    string graph = 1;
+}
+  
+message ElementID {
+   string graph = 1;
+    string id = 2;
+}
+
+message GraphElement {
+    string graph = 1;
+    Vertex vertex = 2;
+    Edge edge = 3;
+}
+
+message Vertex {
+    string gid = 1;
+    string label = 2;
+    google.protobuf.Struct data = 3;
+}
+  
+message Edge {
+    string gid = 1;
+    string label = 2;
+    string from = 3;
+    string to = 4;
+    google.protobuf.Struct data = 5;
+ }
+
+message EditResult {
+    string id = 1;
+}
+
+message BulkEditResult {
+    int32 insert_count = 1;
+    int32 error_count = 2;
+}
+
+message IndexID {
+    string graph = 1;
+    string label = 2;
+    string field = 3;
+}
+  
+message Graph {
+	string graph = 1;
+	repeated Vertex vertices = 2;
+	repeated Edge edges = 3;
+}
+
+
+service GraphInterface {
+    rpc AddVertex(GraphElement) returns (EditResult) {
+      option (google.api.http) = {
+        post: "/v1/graph/{graph}/vertex"
+        body: "vertex"
+      };
+    }
+
+    rpc GetVertex(ElementID) returns (Vertex) {
+        option (google.api.http) = {
+          get: "/v1/graph/{graph}/vertex/{id}"
+        };
+    }
+     
+    rpc BulkAdd(stream GraphElement) returns (BulkEditResult) {
+      option (google.api.http) = {
+        post: "/v1/graph"
+      };
+    }
+  
+    rpc AddGraph(GraphID) returns (EditResult) {
+      option (google.api.http) = {
+        post: "/v1/graph/{graph}"
+      };
+    }
+  
+    rpc DeleteGraph(GraphID) returns (EditResult) {
+      option (google.api.http) = {
+        delete: "/v1/graph/{graph}"
+      };
+    }
+  
+    rpc DeleteVertex(ElementID) returns (EditResult) {
+      option (google.api.http) = {
+        delete: "/v1/graph/{graph}/vertex/{id}"
+      };
+    }
+  
+  
+    rpc DeleteIndex(IndexID) returns (EditResult) {
+      option (google.api.http) = {
+        delete: "/v1/graph/{graph}/index/{label}/{field}"
+      };
+    }
+  
+    rpc AddSchema(Graph) returns (EditResult) {
+      option (google.api.http) = {
+        post: "/v1/graph/{graph}/schema"
+        body: "*"
+      };
+    }
+  
+
+}

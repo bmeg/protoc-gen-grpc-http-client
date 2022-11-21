@@ -20,22 +20,62 @@ package {{.Package}}
 
 import (
 	"io"
+	"fmt"
+	"strings"
+
+	"github.com/go-resty/resty/v2"
+
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/encoding/protojson"
+
+	"github.com/grpc-ecosystem/grpc-gateway/protoc-gen-grpc-gateway/httprule"
+	"github.com/grpc-ecosystem/grpc-gateway/utilities"
 )
 
 // use io module, incase generated sections don't to avoid 'import not used' error
 var _ = io.EOF 
 
+func buildPath(temp httprule.Template, msg proto.Message) string {
+	var stack []string
+	for i := 0; i < len(temp.OpCodes); i += 2 {
+		op := utilities.OpCode(temp.OpCodes[i])
+		operand := temp.OpCodes[i+1]
+		if op == utilities.OpPush {
+		} else if op == utilities.OpPushM {
+		} else if op == utilities.OpLitPush {
+			stack = append(stack, temp.Pool[operand])
+		} else if op == utilities.OpConcatN {
+			n := operand
+			l := len(stack) - n
+			stack = append(stack[:l], strings.Join(stack[l:], "/"))
+		} else if op == utilities.OpCapture {
+			msg.ProtoReflect().Range(func(field protoreflect.FieldDescriptor, val protoreflect.Value) bool {
+				if field.JSONName() == temp.Pool[operand] {
+					stack = append(stack, val.String())
+				}
+				return true
+			})
+		}
+	}
+	segs := strings.Join(stack, "/")
+	if temp.Verb != "" {
+		return fmt.Sprintf("/%s:%s", segs, temp.Verb)
+	}
+	return "/" + segs
+}
 `
 
 var CODE_SERVICE string = `
 // {{.Service}}HttpClient connects to GRPC http gateway
 type {{.Service}}HttpClient struct {
 	server string
+	client *resty.Client
 }
 
 // New{{.Service}}HttpClient creates new {{.Service}}HttpClient
 func New{{.Service}}HttpClient(url string) *{{.Service}}HttpClient {
-	o := &{{.Service}}HttpClient{server:url}
+	o := &{{.Service}}HttpClient{server:url, client:resty.New().SetBaseURL(url)}
   	return o
 }
 
@@ -45,8 +85,34 @@ var CODE_METHOD string = `
 func (client *{{.Service}}HttpClient) {{.Name}}(i *{{.InputType}}) (*{{.OutputType}}, error) {
 	// StreamingInput: {{.StreamInput}}
 	// StreamingOutput: {{.StreamOutput}}
+	// {{.HttpMethod}} {{.HttpPath}}
+	{{if eq .HttpMethod "POST"}}//body: {{.HttpBody}}{{end}}
 	
+	{{if eq .HttpMethod "GET"}}
+	c, _ := httprule.Parse("{{.HttpPath}}")
+	path := buildPath(c.Compile(), i)
+	resp, err := client.client.R().Get(path)
+	if err != nil { 
+		return nil, err
+	}
+	data := resp.Body()
+	out := {{.OutputType}}{}
+	err = protojson.Unmarshal(data, &out)
+	return &out, err
+	{{else if eq .HttpMethod "DELETE"}}
+	c, _ := httprule.Parse("{{.HttpPath}}")
+	path := buildPath(c.Compile(), i)
+	resp, err := client.client.R().Delete(path)
+	if err != nil { 
+		return nil, err
+	}
+	data := resp.Body()
+	out := {{.OutputType}}{}
+	err = protojson.Unmarshal(data, &out)
+	return &out, err
+	{{else}}
 	return nil, nil
+	{{end}}
 }
 
 `
@@ -76,6 +142,9 @@ type methodDesc struct {
 	OutputType   string
 	StreamOutput bool
 	StreamInput  bool
+	HttpMethod   string
+	HttpPath     string
+	HttpBody     string
 }
 
 func cleanProtoType(name string, p string) string {
@@ -124,6 +193,7 @@ func main() {
 
 						httpMethod := ""
 						httpPath := ""
+						httpBody := ""
 						if proto.HasExtension(method.Desc.Options(), annotations.E_Http) {
 							log.Printf("Has HTTP")
 							ext := proto.GetExtension(method.Desc.Options(), annotations.E_Http)
@@ -134,6 +204,13 @@ func main() {
 								if p, ok := opts.Pattern.(*annotations.HttpRule_Get); ok {
 									httpMethod = "GET"
 									httpPath = p.Get
+								} else if p, ok := opts.Pattern.(*annotations.HttpRule_Post); ok {
+									httpMethod = "POST"
+									httpPath = p.Post
+									httpBody = opts.Body
+								} else if p, ok := opts.Pattern.(*annotations.HttpRule_Delete); ok {
+									httpMethod = "DELETE"
+									httpPath = p.Delete
 								} else {
 									log.Printf("http: %#v", opts.Pattern)
 								}
@@ -150,6 +227,7 @@ func main() {
 							StreamInput:  method.Desc.IsStreamingClient(),
 							HttpMethod:   httpMethod,
 							HttpPath:     httpPath,
+							HttpBody:     httpBody,
 						})
 						if err != nil {
 							log.Printf("Error: %s", err)
